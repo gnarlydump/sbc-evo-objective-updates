@@ -67,8 +67,8 @@ EVOLUTIONS_WEBHOOK_URL = os.environ.get("EVOLUTIONS_WEBHOOK_URL", "")
 SBC_WEBHOOK_URL = os.environ.get("SBC_WEBHOOK_URL", "")
 OBJECTIVES_WEBHOOK_URL = os.environ.get("OBJECTIVES_WEBHOOK_URL", "")
 EXPIRING_EVOLUTIONS_WEBHOOK_URL = os.environ.get("EXPIRING_EVOLUTIONS_WEBHOOK_URL", "")
-# Where scraper-health warnings go. Falls back to the evolutions webhook,
-# so this works without any new configuration.
+# Scraper-health warnings are deliberately kept out of public Discord
+# channels. Private operational monitoring happens in the FUT Solutions Codex task.
 ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")
 
 # Optional: Discord role IDs to @-mention when posting. If left blank, the
@@ -156,12 +156,13 @@ def warn_channel(message: str) -> None:
     Falls back to the evolutions webhook when no dedicated alert hook is
     configured, and never raises -- a failed warning must not take the
     run down with it."""
-    url = ALERT_WEBHOOK_URL or EVOLUTIONS_WEBHOOK_URL
     print(f"  !! {message}")
-    if not url:
+    # Never fall back to a public content webhook.
+    if not ALERT_WEBHOOK_URL:
+        print("  ! No private alert webhook configured; details remain in the Actions log.")
         return
     try:
-        post_webhook(url, "", {
+        post_webhook(ALERT_WEBHOOK_URL, "", {
             "title": "\u26a0\ufe0f fut.gg scraper needs a look",
             "description": message[:4000],
             "color": EMBED_COLOR_EXPIRING,
