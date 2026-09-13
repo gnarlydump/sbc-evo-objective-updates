@@ -145,30 +145,13 @@ _AUTO_BACKFILL = 0
 
 
 def warn_channel(message: str) -> None:
-    """Tells a human that the scraper has stopped working.
+    """Records scraper-health warnings in the GitHub Actions log only.
 
-    Every failure so far has been silent -- the cron trigger 404ing after
-    a repo rename, an asset path that made every render throw. The bot
-    logged it, GitHub went green, and the channels just went quiet for
-    days. A category that suddenly yields nothing is the same shape of
-    problem, so it goes somewhere a person will actually see.
-
-    Falls back to the evolutions webhook when no dedicated alert hook is
-    configured, and never raises -- a failed warning must not take the
-    run down with it."""
+    Public Discord content webhooks are never used for operational alerts.
+    The private FUT Solutions Codex monitor reads these logs and reports
+    only actionable issues here.
+    """
     print(f"  !! {message}")
-    # Never fall back to a public content webhook.
-    if not ALERT_WEBHOOK_URL:
-        print("  ! No private alert webhook configured; details remain in the Actions log.")
-        return
-    try:
-        post_webhook(ALERT_WEBHOOK_URL, "", {
-            "title": "\u26a0\ufe0f fut.gg scraper needs a look",
-            "description": message[:4000],
-            "color": EMBED_COLOR_EXPIRING,
-        })
-    except Exception as e:
-        print(f"  ! (couldn't post the warning either: {e})")
 
 
 def backfill_count() -> int:
