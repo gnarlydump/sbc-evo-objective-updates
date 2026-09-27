@@ -85,13 +85,12 @@ EMBED_COLOR_SBC = 0x57F287  # green
 EMBED_COLOR_OBJECTIVE = 0xFEE75C  # yellow
 EMBED_COLOR_EXPIRING = 0xED4245  # red -- urgency
 
-# Expiring-evolution reminder stages, ordered furthest-out first. Each is
-# (stage_name, hours_before_expiry). Every stage whose window has been
-# entered and hasn't already been posted (tracked per-evolution in
-# state["evolutions_expiry_notified"]) gets its own post -- so an evolution
-# discovered with 40 hours left gets only the 6h reminder later, while one
-# discovered with 60 hours left gets both the 48h warning and the 6h final
-# reminder as time passes.
+# Evolution UNLOCK reminder stages, ordered furthest-out first. FUT.GG's
+# endTime is the last chance to start/unlock; endSubmissionTime is the
+# later completion deadline. Alert before unlock closes, not a week later.
+# Existing per-evolution stage keys remain unchanged to preserve dedup.
+# Each entered, unsent window gets a post: at 40h the 48h reminder is due;
+# at <=6h both stages are due if neither was previously delivered.
 EXPIRY_REMINDER_STAGES = [
     ("48h", 48),
     ("final", 6),
@@ -482,10 +481,8 @@ def format_expiry_est(iso_ts: str) -> str | None:
 
 
 def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
-    """Compact reminder embed for an evolution approaching its submission
-    deadline -- exact time left, explicit EST expiry timestamp, and just
-    enough detail (price, unlock requirements) to act on without opening
-    fut.gg."""
+    """Warn before an evolution can no longer be unlocked. Show completion
+    separately so the later deadline cannot be mistaken for time to start."""
     evo = item["evolution"]
     base = item.get("basePlayer") or {}
     upgraded = item.get("upgradedPlayer") or {}
@@ -510,12 +507,15 @@ def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
         )
 
     fields = [
-        {"name": "Time Left", "value": hours_minutes_left(hours_left), "inline": True},
+        {"name": "Time to Unlock", "value": hours_minutes_left(hours_left), "inline": True},
         {"name": "Price", "value": price_text, "inline": True},
     ]
-    expires_est = format_expiry_est(evo.get("endSubmissionTime"))
-    if expires_est:
-        fields.append({"name": "Expires (EST)", "value": expires_est, "inline": True})
+    unlock_est = format_expiry_est(evo.get("endTime"))
+    if unlock_est:
+        fields.append({"name": "Unlock By (EST)", "value": unlock_est, "inline": True})
+    completion_est = format_expiry_est(evo.get("endSubmissionTime"))
+    if completion_est:
+        fields.append({"name": "Complete By (EST)", "value": completion_est, "inline": True})
     # requirementsText is ELIGIBILITY -- who is allowed to use this evo
     # (Max OVR 96, Position ST, Max PS+ 4). Labelling it "How to Unlock"
     # told people it was what they had to DO to complete it, which is a
@@ -530,12 +530,14 @@ def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
     description = f"## {(evo.get('name') or 'Evolution')[:230]}"
     if name_line:
         description += f"\n{name_line}"
+    description += "\nUnlock before the deadline below; the completion deadline is separate."
 
     embed = {
-        "title": "\u23F3 Evolution Expiring Soon",
+        "title": "\u23F3 Evolution Unlock Deadline",
         "description": description,
         "color": EMBED_COLOR_EXPIRING,
         "fields": fields,
+        "footer": {"text": "FUT Solutions is not affiliated with, endorsed by, or sponsored by Electronic Arts."},
     }
     if evo.get("url"):
         embed["url"] = f"{FUTGG_BASE}{evo['url']}"
@@ -545,8 +547,8 @@ def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
 def check_expiring_evolutions(
     evolutions: list[dict], notified: dict[str, list]
 ) -> dict[str, list]:
-    """Posts a reminder for each live evolution that has newly entered a
-    reminder window (see EXPIRY_REMINDER_STAGES) and hasn't been notified
+    """Posts a reminder for each live evolution whose UNLOCK deadline has
+    entered a reminder window (see EXPIRY_REMINDER_STAGES) and hasn't been notified
     for that stage yet. Returns the updated notified map. Only ids present
     in `evolutions` are kept -- ids for evolutions no longer live are
     dropped so the state file doesn't grow forever."""
@@ -556,12 +558,15 @@ def check_expiring_evolutions(
     for item in evolutions:
         evo = item["evolution"]
         evo_id = str(evo["id"])
-        hours_left = hours_until(evo.get("endSubmissionTime"))
+        hours_left = hours_until(evo.get("endTime"))
         already = list(notified.get(evo_id, []))
         updated[evo_id] = already  # carry forward; may append below
 
-        if hours_left is None or hours_left < 0:
-            continue  # no deadline data, or it already expired
+        if hours_left is None:
+            warn_channel(f"Evolution {evo_id} ({evo.get('name')}): missing or invalid unlock deadline; reminder skipped.")
+            continue  # never substitute the later completion deadline
+        if hours_left <= 0:
+            continue  # it can no longer be unlocked
 
         for stage_name, stage_hours in EXPIRY_REMINDER_STAGES:
             if hours_left > stage_hours:
@@ -570,7 +575,7 @@ def check_expiring_evolutions(
                 continue  # already sent this one
             print(
                 f"Posting expiring-evolution reminder ({stage_name}): "
-                f"{evo.get('name')} -- {hours_left:.1f}h left"
+                f"{evo.get('name')} -- {hours_left:.1f}h left to unlock"
             )
             ok = post_webhook(
                 EXPIRING_EVOLUTIONS_WEBHOOK_URL,
