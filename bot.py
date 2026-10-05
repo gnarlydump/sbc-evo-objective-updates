@@ -200,7 +200,11 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
+    # An interrupted write must not replace the last complete checkpoint
+    # with truncated JSON. The temporary file stays on the same filesystem.
+    temporary_path = STATE_PATH.with_name(f".{STATE_PATH.name}.tmp")
+    temporary_path.write_text(json.dumps(state, indent=2, sort_keys=True))
+    temporary_path.replace(STATE_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -545,13 +549,14 @@ def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
 
 
 def check_expiring_evolutions(
-    evolutions: list[dict], notified: dict[str, list]
+    evolutions: list[dict], notified: dict[str, list], on_state_change=None
 ) -> dict[str, list]:
     """Posts a reminder for each live evolution whose UNLOCK deadline has
     entered a reminder window (see EXPIRY_REMINDER_STAGES) and hasn't been notified
     for that stage yet. Returns the updated notified map. Only ids present
     in `evolutions` are kept -- ids for evolutions no longer live are
-    dropped so the state file doesn't grow forever."""
+    dropped so the state file doesn't grow forever. When provided,
+    on_state_change checkpoints each successful delivery immediately."""
     updated: dict[str, list] = {}
     posted_count = 0
 
@@ -585,11 +590,18 @@ def check_expiring_evolutions(
             if ok:
                 already.append(stage_name)
                 posted_count += 1
+                if on_state_change:
+                    # Do not prune unprocessed evolutions if a later item
+                    # raises. Pruning only happens after the complete pass.
+                    checkpoint = {**notified, **updated}
+                    on_state_change({key: list(stages) for key, stages in checkpoint.items()})
                 time.sleep(POST_DELAY_SECONDS)
             else:
                 print(f"  will retry '{evo.get('name')}' ({stage_name}) on the next run")
 
     print(f"Expiring evolutions: posted {posted_count} reminder(s).")
+    if on_state_change:
+        on_state_change(updated)
     return updated
 
 
@@ -1112,10 +1124,12 @@ def process_category(
     webhook_url: str,
     announce_text: str,
     seen_ids: set,
+    on_state_change=None,
 ) -> set:
     """Diffs `items` against `seen_ids`, posts anything new to `webhook_url`,
     and returns the updated set of seen ids (failed posts are left out so
-    they're retried on the next run).
+    they're retried on the next run). An optional on_state_change callback
+    checkpoints each successful normal delivery and the final result.
 
     The role ping goes on the FIRST post of a run only. A refresh that
     finds five new objectives is one event, and pinging the role five
@@ -1156,6 +1170,7 @@ def process_category(
         announce_text = f"{announce_text} (+{held_back} more not shown)"
 
     failed_ids = set()
+    delivered_ids = set(seen_ids)
     posted_count = 0
     announced = False
     for i, item in enumerate(new_items):
@@ -1168,6 +1183,10 @@ def process_category(
         if ok:
             posted_count += 1
             announced = True
+            if not backfill:
+                delivered_ids.add(get_id(item))
+                if on_state_change:
+                    on_state_change(set(delivered_ids))
         else:
             failed_ids.add(get_id(item))
             print(f"  will retry '{name}' on the next run")
@@ -1177,7 +1196,10 @@ def process_category(
     print(f"{label}: posted {posted_count}/{len(new_items)}.")
     if backfill:
         return seen_ids
-    return (seen_ids | all_ids) - failed_ids
+    updated_ids = (seen_ids | all_ids) - failed_ids
+    if on_state_change:
+        on_state_change(updated_ids)
+    return updated_ids
 
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1209,10 @@ def process_category(
 def main() -> int:
     global _AUTO_BACKFILL
     state = load_state()
+
+    def checkpoint(key: str, value) -> None:
+        state[key] = value
+        save_state(state)
 
     # Repost a few recent items so a change lands in the channels straight
     # away. Recorded BEFORE anything posts, and saved immediately: if this
@@ -1279,6 +1305,7 @@ def main() -> int:
             webhook_url=EVOLUTIONS_WEBHOOK_URL,
             announce_text=f"{role_mention(EVOLUTIONS_ROLE_ID)}New evolution(s) added! \U0001F6A8",
             seen_ids=set(state["evolutions_seen"]),
+            on_state_change=lambda ids: checkpoint("evolutions_seen", sorted(ids)),
         )
     )
 
@@ -1292,6 +1319,7 @@ def main() -> int:
             webhook_url=SBC_WEBHOOK_URL,
             announce_text=f"{role_mention(SBC_ROLE_ID)}New SBC(s) added! \U0001F6A8",
             seen_ids=set(state["sbcs_seen"]),
+            on_state_change=lambda ids: checkpoint("sbcs_seen", sorted(ids)),
         )
     )
 
@@ -1305,19 +1333,22 @@ def main() -> int:
             webhook_url=OBJECTIVES_WEBHOOK_URL,
             announce_text=f"{role_mention(OBJECTIVES_ROLE_ID)}New objective(s) added! \U0001F6A8",
             seen_ids=set(state["objectives_seen"]),
+            on_state_change=lambda ids: checkpoint("objectives_seen", sorted(ids)),
         )
     )
 
-    # Only check/update expiry reminders if the fetch actually succeeded --
-    # otherwise an empty `evolutions` list from a failed fetch would look
-    # like every evolution disappeared and wipe their notified-state.
-    if evolutions_fetch_ok:
+    # Only check/update expiry reminders after a successful, nonempty fetch.
+    # An empty result (including a page-shape change) is not enough evidence
+    # that every evolution disappeared. Preserve history until a nonempty
+    # recovery can safely prune it, so reminders are not sent again.
+    if evolutions_fetch_ok and evolutions:
         expiry_notified = state.get("evolutions_expiry_notified", {})
         if os.environ.get("FORCE_EXPIRY_REPOST", "").lower() == "true":
             print("FORCE_EXPIRY_REPOST is set: clearing expiry-reminder history for this run.")
             expiry_notified = {}
         state["evolutions_expiry_notified"] = check_expiring_evolutions(
-            evolutions, expiry_notified
+            evolutions, expiry_notified,
+            on_state_change=lambda notified: checkpoint("evolutions_expiry_notified", notified),
         )
 
     save_state(state)

@@ -27,8 +27,8 @@ on:
 # Two runs executing at once would both read the same "seen" state before
 # either had a chance to save it, and both would post the same "new" items
 # -- this is what caused duplicate Discord posts. Queuing (not canceling)
-# means the second run always starts from the first run's already-updated
-# state, so it correctly sees those items as no longer new.
+# must be paired with the explicit live-main checkout below: the event SHA
+# can predate the previous run's state commit, even after waiting in line.
 concurrency:
   group: futgg-bot-check
   cancel-in-progress: false
@@ -38,10 +38,17 @@ permissions:
 
 jobs:
   check:
+    # This workflow posts to production channels and persists one main ledger.
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
+        id: checkout
         uses: actions/checkout@v4
+        with:
+          # Resolve main when the job starts, not the SHA when it was queued.
+          ref: main
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -71,10 +78,42 @@ jobs:
       # skipped on failure, the seen-ids and the backfill marker are lost,
       # and the next run reposts what already went out.
       - name: Commit updated state
-        if: always()
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         run: |
           git config user.name "futgg-bot"
           git config user.email "actions@users.noreply.github.com"
           git add state/state.json
-          git diff --cached --quiet || git commit -m "Update seen evolutions/SBCs state"
-          git push
+          if git diff --cached --quiet; then
+            echo "No state changes to save."
+            exit 0
+          fi
+          state_base=$(git rev-parse HEAD)
+          git commit -m "Update seen evolutions/SBCs state"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            git fetch origin main
+            # A push can succeed remotely even if its response is lost.
+            if git merge-base --is-ancestor HEAD origin/main; then
+              exit 0
+            fi
+            # Only rebase over unrelated edits. Never overwrite another
+            # writer's ledger, force-push, or rerun the bot to retry a save.
+            if ! git merge-base --is-ancestor "$state_base" origin/main ||
+               ! git diff --quiet "$state_base" origin/main -- state/state.json; then
+              echo "::error::Remote state changed during this run; refusing to overwrite it."
+              exit 1
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              break
+            fi
+            if ! git rebase origin/main; then
+              git rebase --abort
+              echo "::error::Could not safely rebase the saved state."
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::State push failed after three attempts."
+          exit 1
