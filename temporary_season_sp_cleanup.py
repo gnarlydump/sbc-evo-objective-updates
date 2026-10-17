@@ -21,6 +21,7 @@ CHANNEL_ID = "1528621172407799991"
 GUILD_ID = "1528621163390173194"
 APPROVED_COMMIT_MESSAGE = "Run approved Season 1 SP Chase replacement and clean post footers 2026-10-16"
 INSPECT_COMMIT_MESSAGE = "Inspect approved Season 1 SP Chase and objective message ownership 2026-10-16"
+SEASON_ONLY_COMMIT_MESSAGE = "Replace approved Season 1 SP Chase only after read-only verification 2026-10-16"
 SEASON = {
     "id": 2632, "name": "Season 1 SP Chase", "slug": "70-season-1-sp-chase",
     "category": "seasonal", "tasks": 5, "required": None,
@@ -60,6 +61,13 @@ def guard_inspect_context(env):
             env.get("GITHUB_REF") != "refs/heads/main" or
             env.get("APPROVED_EVENT_COMMIT_MESSAGE") != INSPECT_COMMIT_MESSAGE):
         raise CleanupError("Read-only inspection requires its exact diagnostic push on main, attempt 1.")
+
+
+def guard_season_only_context(env):
+    if (env.get("GITHUB_RUN_ATTEMPT") != "1" or env.get("GITHUB_EVENT_NAME") != "push" or
+            env.get("GITHUB_REF") != "refs/heads/main" or
+            env.get("APPROVED_EVENT_COMMIT_MESSAGE") != SEASON_ONLY_COMMIT_MESSAGE):
+        raise CleanupError("Season-only replacement requires its exact approved push on main, attempt 1.")
 
 
 def validated_webhook(raw):
@@ -281,7 +289,14 @@ def inspect_messages(webhook_url, http=requests):
     emit("inspection_complete", mutation_count=0)
 
 
-def replace_season_and_clean_footers(webhook_url, page, http=requests, sleep=time.sleep):
+def replace_season_and_clean_footers(webhook_url, page, http=requests, sleep=time.sleep,
+                                   cleanup_targets=CLEANUP_TARGETS, season_only=False):
+    cleanup_targets = tuple(cleanup_targets)
+    if season_only:
+        if cleanup_targets:
+            raise CleanupError("Season-only mode cannot read or edit footer-cleanup targets.")
+    elif cleanup_targets != CLEANUP_TARGETS:
+        raise CleanupError("Normal cleanup requires the exact three-message allowlist.")
     validate_page(page)
     webhook_url, webhook_id = validated_webhook(webhook_url)
     webhook = json_body(request(http, "GET", webhook_url, {200}))
@@ -289,14 +304,15 @@ def replace_season_and_clean_footers(webhook_url, page, http=requests, sleep=tim
             str(webhook.get("guild_id")) != GUILD_ID or webhook.get("type") != 1):
         raise CleanupError("Objectives webhook does not belong to the approved channel/server.")
 
-    # Preflight ALL FOUR exact messages before the first POST/PATCH/DELETE.
+    # Normal mode preflights all four targets. Explicit Season-only mode
+    # preflights only the old Season post and never reads/edits the three others.
     old = read_message(http, webhook_url, SEASON["old_id"], webhook_id)
     old_embeds = old.get("embeds") or []
     if (len(old_embeds) != 1 or old_embeds[0].get("title") != SEASON["name"] or
             old_embeds[0].get("url") != SEASON["old_url"]):
         raise CleanupError("Old Season message title/source does not exactly match the allowlist.")
     originals = {}
-    for target in CLEANUP_TARGETS:
+    for target in cleanup_targets:
         original = read_message(http, webhook_url, target["message_id"], webhook_id)
         embeds = original.get("embeds") or []
         if (len(embeds) != 1 or embeds[0].get("title") != target["name"] or
@@ -304,7 +320,8 @@ def replace_season_and_clean_footers(webhook_url, page, http=requests, sleep=tim
             raise CleanupError("A footer-cleanup message title/source does not exactly match the allowlist.")
         originals[target["message_id"]] = original
     emit("preflight_passed", season_objective_id=SEASON["id"], old_message_id=SEASON["old_id"],
-         footer_message_ids=[target["message_id"] for target in CLEANUP_TARGETS])
+         footer_message_ids=[target["message_id"] for target in cleanup_targets],
+         mode="season_only" if season_only else "season_and_footers")
 
     posted = json_body(request(http, "POST", webhook_url, {200}, params={"wait": "true"},
                                json={"content": "", "embeds": [page], "allowed_mentions": {"parse": []}}))
@@ -325,7 +342,7 @@ def replace_season_and_clean_footers(webhook_url, page, http=requests, sleep=tim
     sleep(1.5)
 
     cleanup_receipts = []
-    for target in CLEANUP_TARGETS:
+    for target in cleanup_targets:
         message_id = target["message_id"]
         original = originals[message_id]
         # Do not overwrite a message someone edited after the all-target preflight.
@@ -367,9 +384,13 @@ def main(argv=()):
         guard_inspect_context(os.environ)
         inspect_messages(os.environ.get("OBJECTIVES_WEBHOOK_URL", ""))
         return
-    if argv:
+    season_only = list(argv) == ["--season-only"]
+    if argv and not season_only:
         raise CleanupError("Unsupported runner arguments.")
-    guard_context(os.environ)
+    if season_only:
+        guard_season_only_context(os.environ)
+    else:
+        guard_context(os.environ)
     import bot
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
@@ -379,7 +400,11 @@ def main(argv=()):
         finally:
             browser.close()
     page = prepare(objectives, bot.objective_embed, bot.message_embeds)
-    replace_season_and_clean_footers(os.environ.get("OBJECTIVES_WEBHOOK_URL", ""), page)
+    if season_only:
+        replace_season_and_clean_footers(os.environ.get("OBJECTIVES_WEBHOOK_URL", ""), page,
+                                       cleanup_targets=(), season_only=True)
+    else:
+        replace_season_and_clean_footers(os.environ.get("OBJECTIVES_WEBHOOK_URL", ""), page)
 
 
 if __name__ == "__main__":

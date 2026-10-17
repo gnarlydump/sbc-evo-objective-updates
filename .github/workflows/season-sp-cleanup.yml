@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   cleanup:
-    if: ${{ github.ref == 'refs/heads/main' && (github.event.head_commit.message == 'Run approved Season 1 SP Chase replacement and clean post footers 2026-10-16' || github.event.head_commit.message == 'Inspect approved Season 1 SP Chase and objective message ownership 2026-10-16') && github.run_attempt == 1 }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event.head_commit.message == 'Run approved Season 1 SP Chase replacement and clean post footers 2026-10-16' || github.event.head_commit.message == 'Inspect approved Season 1 SP Chase and objective message ownership 2026-10-16' || github.event.head_commit.message == 'Replace approved Season 1 SP Chase only after read-only verification 2026-10-16') && github.run_attempt == 1 }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -31,7 +31,7 @@ jobs:
       - name: Install existing bot dependencies
         run: pip install -r requirements.txt
       - name: Install browser only for the authorized replacement
-        if: ${{ github.event.head_commit.message == 'Run approved Season 1 SP Chase replacement and clean post footers 2026-10-16' }}
+        if: ${{ github.event.head_commit.message == 'Run approved Season 1 SP Chase replacement and clean post footers 2026-10-16' || github.event.head_commit.message == 'Replace approved Season 1 SP Chase only after read-only verification 2026-10-16' }}
         run: playwright install --with-deps chromium
       - name: Inspect only the webhook and four approved message identities
         if: ${{ github.event.head_commit.message == 'Inspect approved Season 1 SP Chase and objective message ownership 2026-10-16' }}
@@ -39,6 +39,12 @@ jobs:
           OBJECTIVES_WEBHOOK_URL: ${{ secrets.OBJECTIVES_WEBHOOK_URL }}
           APPROVED_EVENT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: python temporary_season_sp_cleanup.py --inspect
+      - name: Replace only the approved Season 1 SP Chase post
+        if: ${{ github.event.head_commit.message == 'Replace approved Season 1 SP Chase only after read-only verification 2026-10-16' }}
+        env:
+          OBJECTIVES_WEBHOOK_URL: ${{ secrets.OBJECTIVES_WEBHOOK_URL }}
+          APPROVED_EVENT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: python temporary_season_sp_cleanup.py --season-only
       - name: Replace Season post and remove only the three approved footers
         if: ${{ github.event.head_commit.message == 'Run approved Season 1 SP Chase replacement and clean post footers 2026-10-16' }}
         env:
