@@ -68,6 +68,16 @@ def field(name, value, inline=False):
     return {"name": clean(name), "value": clean(value) or MISSING, "inline": inline}
 
 
+def bullet_lines(text):
+    """Add scan-friendly bullets without changing the source-backed wording."""
+    return text if text == MISSING else "\n".join("• " + line for line in text.split("\n"))
+
+
+def labeled_reward(label, reward):
+    """Keep a single reward beside its label; give multiple rewards their own lines."""
+    return label + ("\n" + bullet_lines(reward) if "\n" in reward else " " + reward)
+
+
 def objective_fields(obj):
     tasks = obj.get("objectives")
     tasks = tasks if isinstance(tasks, list) else []
@@ -76,7 +86,7 @@ def objective_fields(obj):
     required = obj.get("objectivesCompletionCount")
     completion = (f"Complete {required} of {count} tasks" if isinstance(required, int)
                   and required > 0 else f"Complete all {count} tasks")
-    result = [field("Group reward — " + completion, reward_text(obj.get("awards")))]
+    result = [field("Group reward", reward_text(obj.get("awards")) + "\n\n**To earn it:** " + completion)]
     if obj.get("isLocked"):
         result.append(field("Availability", "Locked on FUT.GG — check the unlock requirements in game."))
     if not tasks:
@@ -84,7 +94,7 @@ def objective_fields(obj):
     for index, task in enumerate(tasks, 1):
         description = safe_text(task.get("description")) or MISSING
         result.append(field(f"{index}. {safe_text(task.get('name')) or 'Task'}",
-                            description + "\n\n**Reward:**\n" + reward_text(task.get("awards"))))
+                            description + "\n" + labeled_reward("**Reward:**", reward_text(task.get("awards")))))
     if count > len(tasks):
         result.append(field("Task coverage", f"FUT.GG lists {count} tasks, but only {len(tasks)} task details are available. Open the source for the rest."))
     return result
@@ -96,7 +106,7 @@ def sbc_fields(sbc):
     count = sbc.get("challengesCount")
     count = count if isinstance(count, int) else len(challenges)
     completion = "Complete 1 challenge" if count == 1 else f"Complete all {count} challenges"
-    result = [field("Group reward — " + completion, reward_text(sbc.get("awards")))]
+    result = [field("Group reward", reward_text(sbc.get("awards")) + "\n\n**To earn it:** " + completion)]
     if not challenges:
         result.append(field("Challenge requirements", MISSING))
     for index, challenge in enumerate(challenges, 1):
@@ -118,7 +128,7 @@ def sbc_fields(sbc):
         awards = challenge.get("awards")
         reward = ("No separate challenge reward listed; see the group reward above."
                   if awards == [] else reward_text(awards))
-        lines.extend(["", "**Challenge reward:**", reward])
+        lines.append(labeled_reward("**Challenge reward:**", reward))
         result.append(field(f"{index}. {safe_text(challenge.get('name')) or 'Challenge'}", "\n".join(lines)))
     if count > len(challenges):
         result.append(field("Challenge coverage", f"FUT.GG lists {count} challenges, but only {len(challenges)} challenge details are available. Open the source for the rest."))
@@ -147,14 +157,14 @@ def evolution_fields(evo):
     requirements = evo.get("requirementsText")
     eligibility = ("No player restrictions listed by FUT.GG; check in game."
                    if requirements == [] else kv_text(requirements))
-    result.append(field("Player eligibility", eligibility))
+    result.append(field("Player eligibility", bullet_lines(eligibility)))
     levels = evo.get("levels")
     levels = levels if isinstance(levels, list) else []
     has_choices = evo.get("hasUpgradeChoices") or any(l.get("hasUpgradeChoices") or len(l.get("upgradeOptions") or []) > 1 for l in levels)
     if has_choices:
         result.append(field("Upgrade choices", "Choose one option at each choice level. Options below are alternatives, not combined rewards."))
     elif evo.get("totalUpgradesText"):
-        result.append(field("Overall upgrades", kv_text(evo["totalUpgradesText"])))
+        result.append(field("Overall upgrades", bullet_lines(kv_text(evo["totalUpgradesText"]))))
     if not levels:
         result.append(field("Completion tasks & level rewards", MISSING))
     for position, level in enumerate(levels, 1):
@@ -170,16 +180,17 @@ def evolution_fields(evo):
             tasks = "No match tasks listed by FUT.GG."
         else:
             tasks = MISSING
-        result.append(field(label + " — Tasks", tasks))
+        sections = ["**Tasks**\n" + tasks]
         options = level.get("upgradeOptions") or []
         if level.get("hasUpgradeChoices") or len(options) > 1:
             if not options:
-                result.append(field(label + " — Reward choices", MISSING))
+                sections.append("**Upgrade choices**\n" + MISSING)
             for n, option in enumerate(options, 1):
-                result.append(field(f"{label} — Reward option {option.get('idx') or n} (choose one)",
-                                    kv_text(option.get("totalUpgradesText"))))
+                sections.append(f"**Option {option.get('idx') or n} — choose one**\n" +
+                                bullet_lines(kv_text(option.get("totalUpgradesText"))))
         else:
-            result.append(field(label + " — Rewards", kv_text(level.get("totalUpgradesText"))))
+            sections.append("**Upgrades**\n" + bullet_lines(kv_text(level.get("totalUpgradesText"))))
+        result.append(field(label, "\n\n".join(sections)))
     return result
 
 

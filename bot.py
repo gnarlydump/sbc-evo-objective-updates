@@ -45,7 +45,7 @@ from pathlib import Path
 
 import requests
 from playwright.sync_api import sync_playwright
-from post_details import finalize_embed, objective_fields, sbc_fields, evolution_fields, message_embeds
+from post_details import finalize_embed, objective_fields, sbc_fields, evolution_fields, message_embeds, safe_text
 
 FUTGG_BASE = os.environ.get("FUTGG_BASE", "https://www.fut.gg")
 # Overridable so a fut.gg path change at the FC 27 rollover is a workflow
@@ -881,31 +881,23 @@ def evolution_embed(item: dict) -> dict:
 
     description = name_line + (evo.get("description") or "")
 
+    overview = [
+        f"**Price:** {price_text}",
+        f"**Unlock within:** {relative_days(evo.get('endTime'))}",
+        f"**Complete within:** {relative_days(evo.get('endSubmissionTime'))}",
+    ]
+    if evo.get("isRepeatable") is not None:
+        overview.append("**Repeatable:** " + ("Yes" if evo.get("isRepeatable") else "No"))
+
     embed = {
         "title": evo.get("name") or "New Evolution",
+        "author": {"name": "EVOLUTION"},
         "description": description,
         "color": EMBED_COLOR_EVOLUTION,
         "fields": [
-            {"name": "Price", "value": price_text, "inline": True},
-            {
-                "name": "Unlock Within",
-                "value": relative_days(evo.get("endTime")),
-                "inline": True,
-            },
-            {
-                "name": "Expires In",
-                "value": relative_days(evo.get("endSubmissionTime")),
-                "inline": True,
-            },
+            {"name": "Overview", "value": "\n".join(overview), "inline": False},
         ],
     }
-
-    if evo.get("isRepeatable") is not None:
-        embed["fields"].append({
-            "name": "Repeatable",
-            "value": "Yes" if evo.get("isRepeatable") else "No",
-            "inline": True,
-        })
 
     # All eligibility, level tasks, and rewards. Choice paths stay separate.
     embed["fields"] += evolution_fields(evo)
@@ -973,26 +965,27 @@ def sbc_embed(sbc: dict) -> dict:
     if sbc.get("costPc") and sbc.get("costPc") != sbc.get("cost"):
         cost_bits.append(f"{sbc['costPc']:,} coins (PC)")
     cost_text = " / ".join(cost_bits) if cost_bits else "Unknown"
+    detail_fields = sbc_fields(sbc)
 
     embed = {
         "title": sbc.get("name") or "New SBC",
+        "author": {"name": "SBC"},
         "description": sbc.get("description") or "",
         "color": EMBED_COLOR_SBC,
         "fields": [
-            {"name": "Estimated Cost", "value": cost_text, "inline": True},
+            detail_fields[0],
             {
-                "name": "Expires",
-                "value": relative_days(sbc.get("endTime")),
-                "inline": True,
+                "name": "Overview",
+                "value": f"**Estimated cost:** {cost_text}\n**Expires:** {relative_days(sbc.get('endTime'))}",
+                "inline": False,
             },
-        ],
+        ] + detail_fields[1:],
     }
     if sbc.get("url"):
         embed["url"] = f"{FUTGG_BASE}{sbc['url']}"
-    embed["fields"] += sbc_fields(sbc)
     image_url = sbc_image_url(sbc)
     if image_url:
-        embed["image"] = {"url": image_url}
+        embed["thumbnail"] = {"url": image_url}
     return finalize_embed(embed)
 
 
@@ -1013,29 +1006,30 @@ def objective_image_url(obj: dict) -> str | None:
 
 def objective_embed(obj: dict) -> dict:
     category = (obj.get("category") or {}).get("name", "Objective")
+    detail_fields = objective_fields(obj)
 
     embed = {
         "title": obj.get("name") or "New Objective",
+        "author": {"name": "OBJECTIVE · " + safe_text(category)},
         "description": obj.get("description") or "",
         "color": EMBED_COLOR_OBJECTIVE,
         "fields": [
-            {"name": "Category", "value": category, "inline": True},
+            detail_fields[0],
             {
-                "name": "Expires",
-                "value": relative_days(obj.get("endTime")),
-                "inline": True,
+                "name": "Overview",
+                "value": "**Expires:** " + relative_days(obj.get("endTime")),
+                "inline": False,
             },
-        ],
+        ] + detail_fields[1:],
     }
     category_slug = (obj.get("category") or {}).get("slug")
     if obj.get("slug") and category_slug:
         embed["url"] = f"{FUTGG_BASE}/objectives/{category_slug}/{obj['slug']}/"
     else:
         embed["url"] = OBJECTIVES_URL
-    embed["fields"] += objective_fields(obj)
     image_url = objective_image_url(obj)
     if image_url:
-        embed["image"] = {"url": image_url}
+        embed["thumbnail"] = {"url": image_url}
     return finalize_embed(embed)
 
 
