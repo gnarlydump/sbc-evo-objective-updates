@@ -1,0 +1,41 @@
+name: One-time latest 10 per category organized resend
+run-name: Resend latest 10 Objectives, SBCs and Evolutions — 2026-10-16
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/repost-latest.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: futgg-bot-check
+  cancel-in-progress: false
+
+jobs:
+  repost:
+    if: ${{ github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Repost latest 10 Objectives SBCs and Evolutions in organized layout 2026-10-16' && github.run_attempt == 1 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact approved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install existing bot dependencies
+        run: pip install -r requirements.txt
+      - name: Install the existing browser
+        run: playwright install --with-deps chromium
+      - name: Preflight all 30 and resend only the approved items without pings
+        env:
+          OBJECTIVES_WEBHOOK_URL: ${{ secrets.OBJECTIVES_WEBHOOK_URL }}
+          SBC_WEBHOOK_URL: ${{ secrets.SBC_WEBHOOK_URL }}
+          EVOLUTIONS_WEBHOOK_URL: ${{ secrets.EVOLUTIONS_WEBHOOK_URL }}
+          APPROVED_EVENT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: python temporary_repost_latest.py
