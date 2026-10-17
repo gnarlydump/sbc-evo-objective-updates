@@ -45,6 +45,7 @@ from pathlib import Path
 
 import requests
 from playwright.sync_api import sync_playwright
+from post_details import finalize_embed, objective_fields, sbc_fields, evolution_fields, message_embeds
 
 FUTGG_BASE = os.environ.get("FUTGG_BASE", "https://www.fut.gg")
 # Overridable so a fut.gg path change at the FC 27 rollover is a workflow
@@ -855,6 +856,10 @@ def evolution_embed(item: dict) -> dict:
     evo = item["evolution"]
     base = item.get("basePlayer") or {}
     upgraded = item.get("upgradedPlayer") or {}
+    has_choices = evo.get("hasUpgradeChoices") or any(
+        level.get("hasUpgradeChoices") or len(level.get("upgradeOptions") or []) > 1
+        for level in evo.get("levels") or []
+    )
 
     price_bits = []
     if evo.get("coinsCost"):
@@ -869,17 +874,17 @@ def evolution_embed(item: dict) -> dict:
     price_text = " or ".join(price_bits) if price_bits else "Free"
 
     name_line = ""
-    if base and upgraded:
+    if base and upgraded and not has_choices:
         name_line = (
-            f"{player_name(base)}: {base.get('overall', '?')} -> "
+            f"Example — {player_name(base)}: {base.get('overall', '?')} -> "
             f"{upgraded.get('overall', '?')} OVR\n\n"
         )
 
     description = name_line + (evo.get("description") or "")
 
     embed = {
-        "title": (evo.get("name") or "New Evolution")[:256],
-        "description": description[:4000],
+        "title": evo.get("name") or "New Evolution",
+        "description": description,
         "color": EMBED_COLOR_EVOLUTION,
         "fields": [
             {"name": "Price", "value": price_text, "inline": True},
@@ -903,10 +908,8 @@ def evolution_embed(item: dict) -> dict:
             "inline": True,
         })
 
-    # Every requirement and every upgrade, across as many fields as it
-    # takes -- see kv_fields().
-    embed["fields"] += kv_fields("Requirements", evo.get("requirementsText") or [])
-    embed["fields"] += kv_fields("Upgrades", evo.get("totalUpgradesText") or [])
+    # All eligibility, level tasks, and rewards. Choice paths stay separate.
+    embed["fields"] += evolution_fields(evo)
 
     # What the evolution gives beyond raw stats. Where we can compare
     # against the pre-evolution player we show only what it ADDS or
@@ -918,6 +921,8 @@ def evolution_embed(item: dict) -> dict:
         ("PlayStyles", extract_playstyles(upgraded), extract_playstyles(base)),
         ("Roles", extract_roles(upgraded), extract_roles(base)),
     ):
+        if has_choices:
+            continue  # A sample player's default path is not a guaranteed reward.
         if not after:
             continue
         new_ones = gained(after, before)
@@ -929,7 +934,7 @@ def evolution_embed(item: dict) -> dict:
             name, values = f"{heading} (after evo)", after
         embed["fields"].append({
             "name": name,
-            "value": truncate_field(" \u00b7 ".join(values)),
+            "value": " \u00b7 ".join(values),
             "inline": False,
         })
 
@@ -938,7 +943,7 @@ def evolution_embed(item: dict) -> dict:
     # No card art. fut.gg's image is the player BEFORE the evolution, so
     # showing it next to the upgraded stats invites reading the wrong
     # numbers -- and it pushed the details themselves off the screen.
-    return embed
+    return finalize_embed(embed)
 
 
 def sbc_image_url(sbc: dict) -> str | None:
@@ -971,16 +976,11 @@ def sbc_embed(sbc: dict) -> dict:
     cost_text = " / ".join(cost_bits) if cost_bits else "Unknown"
 
     embed = {
-        "title": (sbc.get("name") or "New SBC")[:256],
-        "description": (sbc.get("description") or "")[:4000],
+        "title": sbc.get("name") or "New SBC",
+        "description": sbc.get("description") or "",
         "color": EMBED_COLOR_SBC,
         "fields": [
             {"name": "Estimated Cost", "value": cost_text, "inline": True},
-            {
-                "name": "Challenges",
-                "value": str(sbc.get("challengesCount", "?")),
-                "inline": True,
-            },
             {
                 "name": "Expires",
                 "value": relative_days(sbc.get("endTime")),
@@ -990,10 +990,11 @@ def sbc_embed(sbc: dict) -> dict:
     }
     if sbc.get("url"):
         embed["url"] = f"{FUTGG_BASE}{sbc['url']}"
+    embed["fields"] += sbc_fields(sbc)
     image_url = sbc_image_url(sbc)
     if image_url:
         embed["image"] = {"url": image_url}
-    return embed
+    return finalize_embed(embed)
 
 
 def objective_image_url(obj: dict) -> str | None:
@@ -1015,16 +1016,11 @@ def objective_embed(obj: dict) -> dict:
     category = (obj.get("category") or {}).get("name", "Objective")
 
     embed = {
-        "title": (obj.get("name") or "New Objective")[:256],
-        "description": (obj.get("description") or "")[:4000],
+        "title": obj.get("name") or "New Objective",
+        "description": obj.get("description") or "",
         "color": EMBED_COLOR_OBJECTIVE,
         "fields": [
             {"name": "Category", "value": category, "inline": True},
-            {
-                "name": "Tasks",
-                "value": str(obj.get("tasksCount", "?")),
-                "inline": True,
-            },
             {
                 "name": "Expires",
                 "value": relative_days(obj.get("endTime")),
@@ -1032,12 +1028,16 @@ def objective_embed(obj: dict) -> dict:
             },
         ],
     }
-    if obj.get("slug"):
-        embed["url"] = f"{FUTGG_BASE}/objectives/{obj['slug']}/"
+    category_slug = (obj.get("category") or {}).get("slug")
+    if obj.get("slug") and category_slug:
+        embed["url"] = f"{FUTGG_BASE}/objectives/{category_slug}/{obj['slug']}/"
+    else:
+        embed["url"] = OBJECTIVES_URL
+    embed["fields"] += objective_fields(obj)
     image_url = objective_image_url(obj)
     if image_url:
         embed["image"] = {"url": image_url}
-    return embed
+    return finalize_embed(embed)
 
 
 # ---------------------------------------------------------------------------
@@ -1066,26 +1066,34 @@ def post_webhook(
     if isinstance(embeds, dict):
         embeds = [embeds]
 
+    # Continuations are sent/checkpointed by process_category, never uploaded
+    # as a text file or bundled into one over-limit Discord message.
+    embeds = [{k: v for k, v in e.items() if not k.startswith("_")} for e in embeds]
+    upload_files = {}
+    if file_bytes and file_name:
+        upload_files["files[0]"] = (file_name, file_bytes, "image/png")
+
     payload = {
         "content": content,
         "embeds": embeds[:10],  # Discord allows at most 10 embeds per message
         # Explicitly allow role pings in the content. Webhooks can ping a
         # role via this even if that role's own "Allow anyone to @mention
         # this role" setting is off.
-        "allowed_mentions": {"parse": ["roles"]},
+        "allowed_mentions": {"parse": ["roles"] if content else []},
     }
 
     for attempt in range(1, max_retries + 1):
         try:
-            if file_bytes and file_name:
+            if upload_files:
                 resp = requests.post(
                     webhook_url,
                     data={"payload_json": json.dumps(payload)},
-                    files={"files[0]": (file_name, file_bytes, "image/png")},
+                    files=upload_files,
+                    params={"wait": "true"},
                     timeout=30,
                 )
             else:
-                resp = requests.post(webhook_url, json=payload, timeout=30)
+                resp = requests.post(webhook_url, json=payload, params={"wait": "true"}, timeout=30)
         except requests.RequestException as e:
             print(f"  ! network error posting to Discord: {e}")
             return False
@@ -1125,6 +1133,8 @@ def process_category(
     announce_text: str,
     seen_ids: set,
     on_state_change=None,
+    delivery_progress=None,
+    on_progress_change=None,
 ) -> set:
     """Diffs `items` against `seen_ids`, posts anything new to `webhook_url`,
     and returns the updated set of seen ids (failed posts are left out so
@@ -1142,16 +1152,25 @@ def process_category(
     not they've been posted before. A backfill deliberately does NOT change
     what counts as seen: letting it would drop anything genuinely new that
     happened to fall outside the first N."""
+    # Only unfinished multi-message items need this optional ledger. Frozen
+    # pages prevent a changing price/expiry/source order from shifting which
+    # part is retried. Confirmed pages are checkpointed before the next send.
+    progress = delivery_progress if delivery_progress is not None else {}
+    def checkpoint_progress():
+        if on_progress_change:
+            on_progress_change(progress)
+
     backfill = backfill_count()
     first_run = not seen_ids
     all_ids = {get_id(item) for item in items}
 
+    pending_ids = {record["id"] for record in progress.values()}
     if backfill:
-        new_items = items[:backfill]
+        new_items = [item for item in items[:backfill] if get_id(item) not in pending_ids]
         print(f"BACKFILL: reposting {len(new_items)} of {len(items)} {label} "
               f"in payload order, ignoring seen state.")
     else:
-        new_items = [] if first_run else [i for i in items if get_id(i) not in seen_ids]
+        new_items = [] if first_run else [i for i in items if get_id(i) not in seen_ids and get_id(i) not in pending_ids]
         if first_run:
             print(f"First run for {label}: seeding {len(items)} item(s) without posting.")
 
@@ -1169,34 +1188,70 @@ def process_category(
     if held_back:
         announce_text = f"{announce_text} (+{held_back} more not shown)"
 
+    # Resume even if a pending item has since disappeared from the catalogue.
+    jobs = [(record["id"], record["name"], None, record)
+            for record in list(progress.values())]
+    jobs += [(get_id(item), get_name(item), item, None) for item in new_items]
+    backfill_only_ids = {record["id"] for record in progress.values()
+                         if record.get("backfill") and record["id"] not in seen_ids}
     failed_ids = set()
     delivered_ids = set(seen_ids)
     posted_count = 0
     announced = False
-    for i, item in enumerate(new_items):
-        name = get_name(item)
+    message_budget = MAX_BACKFILL if backfill else MAX_POSTS_PER_RUN
+    attempted_messages = 0
+    for i, (item_id, name, item, record) in enumerate(jobs):
         print(f"Posting new {label[:-1] if label.endswith('s') else label}: {name}")
-        # Not `i == 0`: if the first post fails, the ping has to ride along
-        # with whichever one actually goes out first.
-        content = "" if announced else announce_text
-        ok = post_webhook(webhook_url, content, embed_fn(item))
+        is_backfill_job = record.get("backfill", False) if record is not None else bool(backfill)
+        pages = record["pages"] if record is not None else message_embeds(embed_fn(item))
+        if record is None and (len(pages) > 1 or attempted_messages >= message_budget):
+            record = {"id": item_id, "name": name, "pages": pages, "next": 0,
+                      "backfill": bool(backfill)}
+            progress[str(item_id)] = record
+            checkpoint_progress()
+        next_part = record["next"] if record is not None else 0
+        ok = True
+        while next_part < len(pages):
+            if attempted_messages >= message_budget:
+                print("  message cap reached; remaining details will continue next run")
+                ok = False
+                break
+            # Continuations never announce or ping again, including on retry.
+            content = announce_text if next_part == 0 and not announced else ""
+            attempted_messages += 1
+            if not post_webhook(webhook_url, content, pages[next_part]):
+                ok = False
+                break
+            if content:
+                announced = True
+            next_part += 1
+            if record is not None:
+                record["next"] = next_part
+                checkpoint_progress()
+            if next_part < len(pages):
+                time.sleep(POST_DELAY_SECONDS)
         if ok:
             posted_count += 1
-            announced = True
-            if not backfill:
-                delivered_ids.add(get_id(item))
+            if not is_backfill_job:
+                delivered_ids.add(item_id)
                 if on_state_change:
                     on_state_change(set(delivered_ids))
+            if record is not None:
+                # 'next == len(pages)' was persisted before the seen-id
+                # checkpoint: a crash between these writes cannot restart it.
+                progress.pop(str(item_id), None)
+                checkpoint_progress()
         else:
-            failed_ids.add(get_id(item))
+            if item_id not in seen_ids:
+                failed_ids.add(item_id)
             print(f"  will retry '{name}' on the next run")
-        if i < len(new_items) - 1:
+        if i < len(jobs) - 1 and attempted_messages < message_budget:
             time.sleep(POST_DELAY_SECONDS)
 
-    print(f"{label}: posted {posted_count}/{len(new_items)}.")
+    print(f"{label}: posted {posted_count}/{len(jobs)}.")
     if backfill:
-        return seen_ids
-    updated_ids = (seen_ids | all_ids) - failed_ids
+        return delivered_ids
+    updated_ids = (delivered_ids | all_ids) - failed_ids - backfill_only_ids
     if on_state_change:
         on_state_change(updated_ids)
     return updated_ids
@@ -1213,6 +1268,13 @@ def main() -> int:
     def checkpoint(key: str, value) -> None:
         state[key] = value
         save_state(state)
+
+    # Existing history is untouched. This key is written only when a long
+    # item actually needs per-part checkpoints, not as a deployment backfill.
+    detail_delivery = state.get("detail_delivery", {})
+    def checkpoint_delivery(category, value):
+        detail_delivery[category] = value
+        checkpoint("detail_delivery", detail_delivery)
 
     # Repost a few recent items so a change lands in the channels straight
     # away. Recorded BEFORE anything posts, and saved immediately: if this
@@ -1306,6 +1368,8 @@ def main() -> int:
             announce_text=f"{role_mention(EVOLUTIONS_ROLE_ID)}New evolution(s) added! \U0001F6A8",
             seen_ids=set(state["evolutions_seen"]),
             on_state_change=lambda ids: checkpoint("evolutions_seen", sorted(ids)),
+            delivery_progress=detail_delivery.get("evolutions", {}),
+            on_progress_change=lambda progress: checkpoint_delivery("evolutions", progress),
         )
     )
 
@@ -1320,6 +1384,8 @@ def main() -> int:
             announce_text=f"{role_mention(SBC_ROLE_ID)}New SBC(s) added! \U0001F6A8",
             seen_ids=set(state["sbcs_seen"]),
             on_state_change=lambda ids: checkpoint("sbcs_seen", sorted(ids)),
+            delivery_progress=detail_delivery.get("sbcs", {}),
+            on_progress_change=lambda progress: checkpoint_delivery("sbcs", progress),
         )
     )
 
@@ -1334,6 +1400,8 @@ def main() -> int:
             announce_text=f"{role_mention(OBJECTIVES_ROLE_ID)}New objective(s) added! \U0001F6A8",
             seen_ids=set(state["objectives_seen"]),
             on_state_change=lambda ids: checkpoint("objectives_seen", sorted(ids)),
+            delivery_progress=detail_delivery.get("objectives", {}),
+            on_progress_change=lambda progress: checkpoint_delivery("objectives", progress),
         )
     )
 
@@ -1358,3 +1426,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
