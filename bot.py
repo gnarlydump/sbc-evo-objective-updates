@@ -959,12 +959,15 @@ def sbc_image_url(sbc: dict) -> str | None:
 
 
 def sbc_embed(sbc: dict) -> dict:
-    cost_bits = []
-    if sbc.get("cost"):
-        cost_bits.append(f"{sbc['cost']:,} coins")
-    if sbc.get("costPc") and sbc.get("costPc") != sbc.get("cost"):
-        cost_bits.append(f"{sbc['costPc']:,} coins (PC)")
-    cost_text = " / ".join(cost_bits) if cost_bits else "Unknown"
+    def platform_cost(value):
+        # FUT.GG's `cost` is the console estimate; `costPc` is independent.
+        # Missing/zero values are not evidence that an SBC is free.
+        if type(value) not in (int, float) or not 0 < value < float("inf"):
+            return "Not available"
+        return f"{value:,} coins"
+
+    cost_text = (f"Console: {platform_cost(sbc.get('cost'))}\n"
+                 f"PC: {platform_cost(sbc.get('costPc'))}")
     detail_fields = sbc_fields(sbc)
 
     embed = {
@@ -976,7 +979,7 @@ def sbc_embed(sbc: dict) -> dict:
             detail_fields[0],
             {
                 "name": "Overview",
-                "value": f"**Estimated cost:** {cost_text}\n**Expires:** {relative_days(sbc.get('endTime'))}",
+                "value": f"**Estimated cost:**\n{cost_text}\n**Expires:** {relative_days(sbc.get('endTime'))}",
                 "inline": False,
             },
         ] + detail_fields[1:],
