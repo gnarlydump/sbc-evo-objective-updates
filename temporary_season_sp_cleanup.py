@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 from urllib.parse import urlsplit
 
@@ -19,6 +20,7 @@ import requests
 CHANNEL_ID = "1528621172407799991"
 GUILD_ID = "1528621163390173194"
 APPROVED_COMMIT_MESSAGE = "Run approved Season 1 SP Chase replacement and clean post footers 2026-10-16"
+INSPECT_COMMIT_MESSAGE = "Inspect approved Season 1 SP Chase and objective message ownership 2026-10-16"
 SEASON = {
     "id": 2632, "name": "Season 1 SP Chase", "slug": "70-season-1-sp-chase",
     "category": "seasonal", "tasks": 5, "required": None,
@@ -51,6 +53,13 @@ def guard_context(env):
         raise CleanupError("This cleanup requires the approved one-time push on main.")
     if env.get("APPROVED_EVENT_COMMIT_MESSAGE") != APPROVED_COMMIT_MESSAGE:
         raise CleanupError("Exact one-time replacement and footer cleanup commit message is required.")
+
+
+def guard_inspect_context(env):
+    if (env.get("GITHUB_RUN_ATTEMPT") != "1" or env.get("GITHUB_EVENT_NAME") != "push" or
+            env.get("GITHUB_REF") != "refs/heads/main" or
+            env.get("APPROVED_EVENT_COMMIT_MESSAGE") != INSPECT_COMMIT_MESSAGE):
+        raise CleanupError("Read-only inspection requires its exact diagnostic push on main, attempt 1.")
 
 
 def validated_webhook(raw):
@@ -205,6 +214,73 @@ def read_message(http, webhook_url, message_id, webhook_id):
     return result
 
 
+def inspect_messages(webhook_url, http=requests):
+    """Five GETs for an in-scope webhook; never POST/PATCH/DELETE.
+
+    A webhook GET 404 cannot distinguish a deleted message from a message owned
+    by another webhook. Log only safe identity fields, never response bodies,
+    webhook URLs/tokens, attachment URLs, or arbitrary embed URLs.
+    """
+    webhook_url, webhook_id = validated_webhook(webhook_url)
+
+    def get(url, label, message_id=None):
+        try:
+            response = http.request("GET", url, timeout=30, allow_redirects=False)
+        except requests.RequestException:
+            emit("inspect_get", target=label, message_id=message_id, status="transport_error")
+            return None
+        return response
+
+    def safe_id(value):
+        value = str(value or "")
+        return value if re.fullmatch(r"\d{17,20}", value) else "unexpected_or_missing"
+
+    response = get(webhook_url, "webhook")
+    if response is None:
+        return
+    if response.status_code != 200:
+        emit("inspect_webhook", status=response.status_code, expected_webhook_id=webhook_id)
+        return
+    metadata = json_body(response)
+    in_scope = (str(metadata.get("id")) == webhook_id and str(metadata.get("channel_id")) == CHANNEL_ID and
+                str(metadata.get("guild_id")) == GUILD_ID and metadata.get("type") == 1)
+    emit("inspect_webhook", status=200, webhook_id=safe_id(metadata.get("id")),
+         channel_id=safe_id(metadata.get("channel_id")), guild_id=safe_id(metadata.get("guild_id")),
+         expected_scope_matches=in_scope)
+    if not in_scope:
+        raise CleanupError("Diagnostic webhook identity is outside the approved channel/server.")
+    targets = [("old_season", SEASON["old_id"], SEASON["name"], SEASON["old_url"])]
+    targets += [("footer_cleanup", target["message_id"], target["name"], target["url"]) for target in CLEANUP_TARGETS]
+    for label, message_id, name, url in targets:
+        response = get(webhook_url + "/messages/" + message_id, label, message_id)
+        if response is None:
+            continue
+        if response.status_code != 200:
+            emit("inspect_message", target=label, message_id=message_id, expected_title=name,
+                 expected_url=url, status=response.status_code,
+                 meaning="Unavailable to this webhook; not proof of deletion." if response.status_code == 404 else "Read-only lookup failed.")
+            continue
+        message = json_body(response)
+        embeds = message.get("embeds") or []
+        embed = embeds[0] if len(embeds) == 1 else {}
+        observed_url = str(embed.get("url") or "")
+        try:
+            parsed = urlsplit(observed_url)
+            safe_url = (observed_url if parsed.scheme == "https" and parsed.netloc == "www.fut.gg" and
+                        parsed.path.startswith("/objectives/") and not parsed.query and not parsed.fragment and
+                        len(observed_url) <= 250 else "unexpected_or_missing")
+        except ValueError:
+            safe_url = "unexpected_or_missing"
+        emit("inspect_message", target=label, message_id=message_id, status=200,
+             observed_id=safe_id(message.get("id")), channel_id=safe_id(message.get("channel_id")),
+             webhook_id=safe_id(message.get("webhook_id")), title=str(embed.get("title") or "")[:256],
+             source_url=safe_url, embed_count=len(embeds), footer_present="footer" in embed,
+             expected_identity_matches=(str(message.get("id")) == message_id and
+                 str(message.get("channel_id")) == CHANNEL_ID and str(message.get("webhook_id")) == webhook_id and
+                 embed.get("title") == name and embed.get("url") == url))
+    emit("inspection_complete", mutation_count=0)
+
+
 def replace_season_and_clean_footers(webhook_url, page, http=requests, sleep=time.sleep):
     validate_page(page)
     webhook_url, webhook_id = validated_webhook(webhook_url)
@@ -286,7 +362,13 @@ def replace_season_and_clean_footers(webhook_url, page, http=requests, sleep=tim
     return {"replacement": season_receipt, "footer_removals": cleanup_receipts, "deleted_count": 1}
 
 
-def main():
+def main(argv=()):
+    if list(argv) == ["--inspect"]:
+        guard_inspect_context(os.environ)
+        inspect_messages(os.environ.get("OBJECTIVES_WEBHOOK_URL", ""))
+        return
+    if argv:
+        raise CleanupError("Unsupported runner arguments.")
     guard_context(os.environ)
     import bot
     from playwright.sync_api import sync_playwright
@@ -302,7 +384,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        main(sys.argv[1:])
     except CleanupError as error:
         emit("stopped", reason=str(error), instruction="Inspect receipts and the channel before any further action; no automatic retry.")
         raise SystemExit(1)
