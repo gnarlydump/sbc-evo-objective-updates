@@ -3,8 +3,6 @@
 import copy
 import re
 
-DISCLAIMER = "FUT Solutions is not affiliated with, endorsed by, or sponsored by Electronic Arts Inc."
-FOOTER = "Source: FUT.GG • " + DISCLAIMER
 MISSING = "Not listed by FUT.GG. Check the source before completing."
 
 
@@ -208,7 +206,6 @@ def full_text(embed):
         lines.extend([page.get("title", ""), page.get("url", ""), "", page.get("description", "")])
         for item in page.get("fields", []):
             lines.extend(["", item.get("name", ""), item.get("value", "")])
-        lines.extend(["", FOOTER])
     return "\n".join(lines)
 
 
@@ -230,9 +227,9 @@ def finalize_embed(embed):
     embed = copy.deepcopy(embed)
     embed.pop("_full_details_text", None)
     embed.pop("_continuation_embeds", None)
+    embed.pop("footer", None)
     original_title = clean(embed.get("title")) or "FUT.GG update"
     description = clean(embed.get("description"))
-    embed["footer"] = {"text": FOOTER}
     fields = []
 
     def add_fields(name, value, inline=False):
@@ -282,7 +279,6 @@ def finalize_embed(embed):
             key: copy.deepcopy(embed[key]) for key in ("color", "url", "timestamp") if key in embed
         }
         page["title"] = original_title[:230]
-        page["footer"] = {"text": FOOTER}
         page["fields"] = []
         return page
 

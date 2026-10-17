@@ -542,7 +542,6 @@ def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
         "description": description,
         "color": EMBED_COLOR_EXPIRING,
         "fields": fields,
-        "footer": {"text": "FUT Solutions is not affiliated with, endorsed by, or sponsored by Electronic Arts."},
     }
     if evo.get("url"):
         embed["url"] = f"{FUTGG_BASE}{evo['url']}"
