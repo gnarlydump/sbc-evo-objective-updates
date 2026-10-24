@@ -486,7 +486,7 @@ def format_expiry_est(iso_ts: str) -> str | None:
 
 
 def expiry_deadline_text(iso_ts: str) -> str:
-    """Live Discord countdown/local date plus the existing fixed EST reference.
+    """One explicit UTC deadline, shared by every notification category.
 
     Absolute timestamps stay correct when a long reminder resumes later.
     A timezone-less or malformed source date must not become a guessed deadline.
@@ -495,11 +495,10 @@ def expiry_deadline_text(iso_ts: str) -> str:
         dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             raise ValueError("Missing timezone")
-        timestamp = int(dt.timestamp())
+        utc = dt.astimezone(timezone.utc)
     except (AttributeError, TypeError, ValueError, OverflowError):
         return "Not listed — check the deadline in game."
-    return (f"**<t:{timestamp}:R>** · <t:{timestamp}:F>\n"
-            f"Fixed reference: {format_expiry_est(iso_ts)}")
+    return f"{utc.day} {utc.strftime('%b %Y at %H:%M')} UTC"
 
 
 def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
@@ -966,8 +965,8 @@ def evolution_embed(item: dict) -> dict:
 
     overview = [
         f"**Price:** {price_text}",
-        f"**Unlock within:** {relative_days(evo.get('endTime'))}",
-        f"**Complete within:** {relative_days(evo.get('endSubmissionTime'))}",
+        f"**Unlock by:** {expiry_deadline_text(evo.get('endTime'))}",
+        f"**Finish by:** {expiry_deadline_text(evo.get('endSubmissionTime'))}",
     ]
     if evo.get("isRepeatable") is not None:
         overview.append("**Repeatable:** " + ("Yes" if evo.get("isRepeatable") else "No"))
@@ -1062,7 +1061,7 @@ def sbc_embed(sbc: dict) -> dict:
             detail_fields[0],
             {
                 "name": "Overview",
-                "value": f"**Estimated cost:**\n{cost_text}\n**Expires:** {relative_days(sbc.get('endTime'))}",
+                "value": f"**Estimated cost:**\n{cost_text}\n**Expires:** {expiry_deadline_text(sbc.get('endTime'))}",
                 "inline": False,
             },
         ] + detail_fields[1:],
@@ -1103,7 +1102,7 @@ def objective_embed(obj: dict) -> dict:
             detail_fields[0],
             {
                 "name": "Overview",
-                "value": "**Expires:** " + relative_days(obj.get("endTime")),
+                "value": "**Expires:** " + expiry_deadline_text(obj.get("endTime")),
                 "inline": False,
             },
         ] + detail_fields[1:],
