@@ -485,18 +485,32 @@ def format_expiry_est(iso_ts: str) -> str | None:
     return fixed_est.strftime("%b %d, %Y, %I:%M %p EST").replace(" 0", " ")
 
 
+def expiry_deadline_text(iso_ts: str) -> str:
+    """Live Discord countdown/local date plus the existing fixed EST reference.
+
+    Absolute timestamps stay correct when a long reminder resumes later.
+    A timezone-less or malformed source date must not become a guessed deadline.
+    """
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            raise ValueError("Missing timezone")
+        timestamp = int(dt.timestamp())
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return "Not listed — check the deadline in game."
+    return (f"**<t:{timestamp}:R>** · <t:{timestamp}:F>\n"
+            f"Fixed reference: {format_expiry_est(iso_ts)}")
+
+
 def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
-    """Warn before an evolution can no longer be unlocked. Show completion
-    separately so the later deadline cannot be mistaken for time to start."""
+    """A deadline-first reminder with all source-backed tasks and rewards inline."""
     evo = item["evolution"]
-    base = item.get("basePlayer") or {}
-    upgraded = item.get("upgradedPlayer") or {}
 
     price_bits = []
     if evo.get("coinsCost"):
         price_bits.append(f"{evo['coinsCost']:,} coins")
     if evo.get("pointsCost"):
-        price_bits.append(f"{evo['pointsCost']:,} points")
+        price_bits.append(f"{evo['pointsCost']:,} FC Points")
     if evo.get("tokenCost"):
         price_bits.append(token_price(evo["tokenCost"], evo))
     # Coins, FC Points and tokens are ALTERNATIVE ways to pay for an
@@ -504,52 +518,75 @@ def expiring_evolution_embed(item: dict, hours_left: float) -> dict:
     # the cost.
     price_text = " or ".join(price_bits) if price_bits else "Free"
 
-    name_line = ""
-    if base and upgraded:
-        name_line = (
-            f"{player_name(base)}: {base.get('overall', '?')} -> "
-            f"{upgraded.get('overall', '?')} OVR"
-        )
-
     fields = [
-        {"name": "Time to Unlock", "value": hours_minutes_left(hours_left), "inline": True},
-        {"name": "Price", "value": price_text, "inline": True},
+        {"name": "Unlock by — don't miss this", "value":
+         expiry_deadline_text(evo.get("endTime")) +
+         "\nUnlock this Evo before access closes.", "inline": False},
+        {"name": "Finish by — once unlocked", "value":
+         expiry_deadline_text(evo.get("endSubmissionTime")) +
+         "\nFinish its level tasks by this deadline. This is not extra time to unlock it.",
+         "inline": False},
     ]
-    unlock_est = format_expiry_est(evo.get("endTime"))
-    if unlock_est:
-        fields.append({"name": "Unlock By (EST)", "value": unlock_est, "inline": True})
-    completion_est = format_expiry_est(evo.get("endSubmissionTime"))
-    if completion_est:
-        fields.append({"name": "Complete By (EST)", "value": completion_est, "inline": True})
-    # requirementsText is ELIGIBILITY -- who is allowed to use this evo
-    # (Max OVR 96, Position ST, Max PS+ 4). Labelling it "How to Unlock"
-    # told people it was what they had to DO to complete it, which is a
-    # different thing fut.gg exposes separately. Same wording as the new
-    # evolution post, and every line rather than the first 20.
-    fields += kv_fields("Requirements", evo.get("requirementsText") or [])
+    overview = [f"**Cost:** {safe_text(price_text)}"]
+    if evo.get("isRepeatable") is not None:
+        overview.append("**Repeatable:** " + ("Yes" if evo["isRepeatable"] else "No"))
+    levels = evo.get("levels") or []
+    if levels:
+        overview.append(f"**Levels:** {len(levels)} · Tasks and rewards below")
+    fields.append({"name": "At a glance", "value": "\n".join(overview), "inline": False})
 
-    # The evolution's name is what tells one of these posts from another,
-    # so it gets a markdown heading rather than plain bold -- Discord
-    # renders "##" noticeably larger than bold body text, which is all it
-    # was before. The banner stays as the title.
-    description = f"## {(evo.get('name') or 'Evolution')[:230]}"
-    if name_line:
-        description += f"\n{name_line}"
-    description += "\nUnlock before the deadline below; the completion deadline is separate."
+    # Reuse the proven source formatter, but put the reward summary before
+    # eligibility. Keep levels in source order and choices as alternatives.
+    # Do not print the same long stat list twice. Keep headline rewards here;
+    # move a stat out of this summary ONLY when its exact row is still shown
+    # in a level below. Unmatched totals and incomplete source data stay visible.
+    level_rows = {
+        json.dumps(row, sort_keys=True)
+        for level in levels for row in level.get("totalUpgradesText") or []
+    }
+    totals = evo.get("totalUpgradesText") or []
+    highlights = []
+    for row in totals:
+        label = str(row.get("label", "")).casefold() if isinstance(row, dict) else ""
+        headline = label in {"overall", "wf", "sm", "weak foot", "skill moves"} or any(
+            word in label for word in ("playstyle", "role", "position", "rarity")
+        )
+        if headline or json.dumps(row, sort_keys=True) not in level_rows:
+            highlights.append(row)
+    details = evolution_fields({**evo, "totalUpgradesText": highlights})
+    summary = [f for f in details if f["name"] == "Overall upgrades"]
+    other = [f for f in details if f["name"] != "Overall upgrades"]
+    for detail in summary + other:
+        detail = dict(detail)
+        if detail["name"] == "Overall upgrades":
+            detail["name"] = "What you get"
+            if len(highlights) < len(totals):
+                detail["value"] += "\n\nFull stat upgrades are listed with each level below."
+        elif detail["name"] == "Player eligibility":
+            detail["name"] = "Who can use it — player requirements"
+        elif re.fullmatch(r"Level \d+", detail["name"]):
+            detail["name"] += " — tasks & rewards"
+        fields.append(detail)
+
+    description = "**Unlock first. Finish the tasks before the separate completion deadline.**"
+    if evo.get("description"):
+        description += "\n\n" + safe_text(evo["description"])
 
     embed = {
-        "title": "\u23F3 Evolution Unlock Deadline",
+        "title": safe_text(evo.get("name") or "Evolution"),
+        "author": {"name": "EXPIRING EVOLUTION · UNLOCK REMINDER"},
         "description": description,
         "color": EMBED_COLOR_EXPIRING,
         "fields": fields,
     }
     if evo.get("url"):
         embed["url"] = f"{FUTGG_BASE}{evo['url']}"
-    return embed
+    return finalize_embed(embed)
 
 
 def check_expiring_evolutions(
-    evolutions: list[dict], notified: dict[str, list], on_state_change=None
+    evolutions: list[dict], notified: dict[str, list], on_state_change=None,
+    delivery_progress=None, on_progress_change=None,
 ) -> dict[str, list]:
     """Posts a reminder for each live evolution whose UNLOCK deadline has
     entered a reminder window (see EXPIRY_REMINDER_STAGES) and hasn't been notified
@@ -559,6 +596,22 @@ def check_expiring_evolutions(
     on_state_change checkpoints each successful delivery immediately."""
     updated: dict[str, list] = {}
     posted_count = 0
+    progress = delivery_progress if delivery_progress is not None else {}
+
+    def checkpoint_progress():
+        if on_progress_change:
+            on_progress_change(progress)
+
+    # Do not let a malformed later item prevent earlier deliveries from
+    # checkpointing. Normal item processing below retains its failure point.
+    live_ids = {str(item["evolution"]["id"]) for item in evolutions
+                if isinstance(item, dict) and isinstance(item.get("evolution"), dict)
+                and "id" in item["evolution"]}
+    for key in list(progress):
+        if key.split(":", 1)[0] not in live_ids:
+            # An unlock reminder must never resume for a vanished Evo.
+            progress.pop(key)
+            checkpoint_progress()
 
     for item in evolutions:
         evo = item["evolution"]
@@ -567,6 +620,11 @@ def check_expiring_evolutions(
         already = list(notified.get(evo_id, []))
         updated[evo_id] = already  # carry forward; may append below
 
+        if hours_left is None or hours_left <= 0:
+            for key in list(progress):
+                if key.split(":", 1)[0] == evo_id:
+                    progress.pop(key)
+                    checkpoint_progress()
         if hours_left is None:
             warn_channel(f"Evolution {evo_id} ({evo.get('name')}): missing or invalid unlock deadline; reminder skipped.")
             continue  # never substitute the later completion deadline
@@ -574,19 +632,39 @@ def check_expiring_evolutions(
             continue  # it can no longer be unlocked
 
         for stage_name, stage_hours in EXPIRY_REMINDER_STAGES:
+            progress_key = f"{evo_id}:{stage_name}"
+            if stage_name in already:
+                if progress_key in progress:
+                    progress.pop(progress_key)
+                    checkpoint_progress()
+                continue  # already sent this one
             if hours_left > stage_hours:
                 continue  # not in this window yet
-            if stage_name in already:
-                continue  # already sent this one
+            record = progress.get(progress_key)
             print(
                 f"Posting expiring-evolution reminder ({stage_name}): "
                 f"{evo.get('name')} -- {hours_left:.1f}h left to unlock"
             )
-            ok = post_webhook(
-                EXPIRING_EVOLUTIONS_WEBHOOK_URL,
-                role_mention(EXPIRING_ROLE_ID).strip(),
-                expiring_evolution_embed(item, hours_left),
+            pages = record["pages"] if record is not None else message_embeds(
+                expiring_evolution_embed(item, hours_left)
             )
+            if record is None and len(pages) > 1:
+                record = {"pages": pages, "next": 0}
+                progress[progress_key] = record
+                checkpoint_progress()  # freeze before the first send
+            next_part = record["next"] if record is not None else 0
+            ok = True
+            while next_part < len(pages):
+                content = role_mention(EXPIRING_ROLE_ID).strip() if next_part == 0 else ""
+                if not post_webhook(EXPIRING_EVOLUTIONS_WEBHOOK_URL, content, pages[next_part]):
+                    ok = False
+                    break
+                next_part += 1
+                if record is not None:
+                    record["next"] = next_part
+                    checkpoint_progress()
+                if next_part < len(pages):
+                    time.sleep(POST_DELAY_SECONDS)
             if ok:
                 already.append(stage_name)
                 posted_count += 1
@@ -595,9 +673,14 @@ def check_expiring_evolutions(
                     # raises. Pruning only happens after the complete pass.
                     checkpoint = {**notified, **updated}
                     on_state_change({key: list(stages) for key, stages in checkpoint.items()})
+                if record is not None:
+                    # Persist the stage before removing its finished receipt.
+                    progress.pop(progress_key, None)
+                    checkpoint_progress()
                 time.sleep(POST_DELAY_SECONDS)
             else:
                 print(f"  will retry '{evo.get('name')}' ({stage_name}) on the next run")
+                break  # finish this stage before starting another for the Evo
 
     print(f"Expiring evolutions: posted {posted_count} reminder(s).")
     if on_state_change:
@@ -1413,6 +1496,8 @@ def main() -> int:
         state["evolutions_expiry_notified"] = check_expiring_evolutions(
             evolutions, expiry_notified,
             on_state_change=lambda notified: checkpoint("evolutions_expiry_notified", notified),
+            delivery_progress=detail_delivery.get("expiring", {}),
+            on_progress_change=lambda progress: checkpoint_delivery("expiring", progress),
         )
 
     save_state(state)
@@ -1422,4 +1507,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
