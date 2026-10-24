@@ -104,6 +104,37 @@ roles, the bot can @-mention that role in the announcement message.
    `allowed_mentions` explicitly, so the ping works even if the role's own
    "Allow anyone to @mention this role" setting is off.
 
+## Standard for update times: UTC only
+
+All current and future automated Discord update types use **UTC** whenever a
+date and clock time are needed. This is a standing presentation rule, not an
+expiry-reminder-only setting.
+
+- Show one clearly labeled time per event or deadline:
+  **Unlock by: 24 Oct 2026 at 17:00 UTC**.
+- Apply the same format to start, unlock, finish, expiry, availability, and any
+  future generated time markers. Current coverage includes Evolutions, SBCs,
+  Objectives, and expiring-Evolution reminders.
+- Reuse `expiry_deadline_text()` in `bot.py` (the shared UTC formatter); convert
+  timezone-aware source timestamps to UTC. Do not relabel local times as UTC.
+- Do not add UK/EST alternatives, fixed-reference lines, duplicate timestamps,
+  or Discord viewer-local/countdown timestamp markup.
+- If the source timestamp is missing, invalid, or has no timezone, use an honest
+  unavailable/in-game-check fallback. Do not invent a time or timezone.
+- Durations such as "8 hours" are durations, not clock times. Preserve verified
+  source challenge prose rather than guessing conversions from free text.
+- Keep separate unlock and completion deadlines clearly labeled. One time per
+  deadline does not mean collapsing two different deadlines into one.
+- This display standard does not change workflow schedules, reminder windows,
+  pings, deduplication, state, rate limits, or delivery behavior. Operational
+  scheduling remains under the existing America/Phoenix requirements.
+- Existing Discord messages and frozen in-progress continuation payloads are
+  not rewritten by this policy. New templates and newly formatted posts must
+  follow it.
+
+Before releasing formatting changes, check all post types, source-offset
+conversion, day/year rollover, DST-boundary dates, and missing/invalid timestamps.
+
 ## Customizing
 
 - **Frequency:** edit the `cron` lines in `.github/workflows/check.yml`
